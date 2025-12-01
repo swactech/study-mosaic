@@ -1,0 +1,9 @@
+google-adk
+pdfplumber
+chromadb
+tiktoken
+gradio
+streamlit
+pydantic
+python-dotenv
+google-generativeai
