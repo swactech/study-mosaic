@@ -55,12 +55,48 @@ class FlashcardSet(BaseModel):
     )
 
 
+def _strip_additional_properties(schema: dict) -> dict:
+    """
+    Recursively remove additionalProperties/additional_properties so GenAI schema validation accepts it.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    schema.pop("additionalProperties", None)
+    schema.pop("additional_properties", None)
+    for key, value in list(schema.items()):
+        if isinstance(value, dict):
+            schema[key] = _strip_additional_properties(value)
+        elif isinstance(value, list):
+            schema[key] = [_strip_additional_properties(v) for v in value]
+    return schema
+
+
+class FlashcardSetStrict(FlashcardSet):
+    """Schema sanitized for response_schema compatibility."""
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        schema = super().model_json_schema(*args, **kwargs)
+        return _strip_additional_properties(schema)
+
+
 class CoverageResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    continue_: bool = Field(alias="continue", description="Whether to continue generating.")
+    continue_: bool = Field(
+        alias="continue", description="Whether to continue generating.")
     coverage: float = Field(ge=0, le=1, description="Coverage ratio achieved.")
-    missing: List[str] = Field(default_factory=list, description="Chunk IDs not yet cited.")
+    missing: List[str] = Field(
+        default_factory=list, description="Chunk IDs not yet cited.")
+
+
+class CoverageResultStrict(CoverageResult):
+    """Schema sanitized for response_schema compatibility."""
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        schema = super().model_json_schema(*args, **kwargs)
+        return _strip_additional_properties(schema)
 
 
 FLASHCARD_SYSTEM_PROMPT = dedent(
@@ -76,13 +112,13 @@ FLASHCARD_SYSTEM_PROMPT = dedent(
     - Include at least one verbatim supporting span from the context.
     - For each quoted span, record the associated `chunk_id` and `page`.
     5. Respond ONLY with a JSON object matching this exact schema:
-    {json.dumps(FlashcardSet.model_json_schema(), indent=2)}
+    {json.dumps(FlashcardSetStrict.model_json_schema(), indent=2)}
     """
 ).strip()
 
 SUPERVISOR_SYSTEM_PROMPT = dedent(
     """
-    You are the supervisor agent for Study-Mosaic.
+    You are the supervisor agent.
     Decide whether the user wants flashcards, summaries, Socratic questions, or quizzes.
     Route flashcard requests to the flashcard agent.
     Always enforce grounding: only use provided context; no inventing citations.
@@ -91,14 +127,14 @@ SUPERVISOR_SYSTEM_PROMPT = dedent(
 
 COVERAGE_SYSTEM_PROMPT = dedent(
     """
-    You are a coverage evaluator for Study-Mosaic flashcards.
+    You are a coverage evaluator for flashcards.
     Given:
     - total_chunks: all chunk IDs retrieved for this request
     - cited_chunks: chunk IDs cited by generated flashcards so far
-    - coverage_threshold: minimum fraction required to stop
+    - coverage_threshold (0-1): {coverage_threshold}
 
     Decide whether to continue generation.
-    Output JSON: {"continue": true|false, "coverage": float, "missing": ["chunk_id", ...]}
+    Output JSON: {{ "continue": true|false, "coverage": float, "missing": ["chunk_id", ...] }}
     Only include missing chunk_ids that are not yet cited.
     """
 ).strip()

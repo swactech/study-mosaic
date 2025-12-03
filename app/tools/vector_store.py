@@ -59,6 +59,14 @@ class GeminiEmbeddingFunction:
                     time.sleep(delay + random.uniform(0, 0.5))
         return embeddings
 
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Chroma compatibility: embed a list of documents."""
+        return self(texts)
+
+    def embed_query(self, input: str) -> List[float]:
+        """Chroma compatibility: embed a single query string."""
+        return self([input])[0]
+
     def name(self) -> str:
         """Expose a stable name to satisfy Chroma's embedding function checks."""
         return "gemini-embedding-function"
@@ -112,3 +120,22 @@ class LocalVectorStore:
             score = results["distances"][0][idx]
             hits.append((doc_id, doc, meta, score))
         return hits
+
+    def count(self) -> int:
+        """Return how many chunks are stored for the session."""
+        return self.collection.count()
+
+    def list_metadatas(self) -> List[dict]:
+        """Return stored chunk metadata for the session."""
+        results = self.collection.get(include=["metadatas"])
+        metadatas = results.get("metadatas") or []
+        # Some Chroma versions return a nested list, flatten if needed.
+        if metadatas and isinstance(metadatas[0], list):
+            flat: List[dict] = []
+            for meta in metadatas:
+                if isinstance(meta, list):
+                    flat.extend(m for m in meta if m)
+                elif meta:
+                    flat.append(meta)
+            metadatas = flat
+        return [m for m in metadatas if m]

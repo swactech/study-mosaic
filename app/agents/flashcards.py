@@ -6,7 +6,7 @@ import json
 from typing import List, Dict, Optional
 
 from app.config import settings
-from app.context.prompts import FlashcardSet, FLASHCARD_SYSTEM_PROMPT
+from app.context.prompts import FlashcardSetStrict, FLASHCARD_SYSTEM_PROMPT
 
 # Prefer documented import path; fall back to legacy name if needed.
 try:
@@ -30,18 +30,17 @@ class FlashcardAgent:
             description="Generates grounded flashcards with citations.",
             instruction=FLASHCARD_SYSTEM_PROMPT,
             model=settings.model_name,
-            output_schema=FlashcardSet,
+            output_schema=FlashcardSetStrict,
             output_key="flashcards",
         )
 
-    def generate(
+    def prepare_context(
         self,
-        session_id: str,
         request: str,
         chunks: List[Dict],
     ) -> List[Dict]:
         """
-        Generate flashcards for the given request using provided chunks as context.
+        prepare context for flashcard agent
         """
         if not chunks:
             return []
@@ -58,8 +57,27 @@ class FlashcardAgent:
             "request": request,
             "context": context_blob,
         }
-        raw_response = self.agent.run(
-            messages=[{"role": "user", "content": json.dumps(payload)}]
-        )
-        cards = raw_response.output  # type: ignore[attr-defined]
-        return cards if isinstance(cards, list) else [cards]
+        return payload
+
+    def parse_output(self, chunks, new_cards):
+        total_chunk_ids = [c["id"] for c in chunks]
+        covered: set = set()
+        all_cards: List[Dict] = []
+        existing_questions = {c.get("question") for c in all_cards}
+        for card in new_cards:
+            if card.get("question") in existing_questions:
+                continue
+            all_cards.append(card)
+            existing_questions.add(card.get("question"))
+            for cite in card.get("citations", []):
+                cid = cite.get("location", {}).get("chunk_id")
+                if cid:
+                    covered.add(cid)
+
+        coverage_ratio = len(covered) / len(total_chunk_ids)
+        return {
+            "flashcards": all_cards,
+            "coverage": coverage_ratio,
+            "cited_chunks": list(covered),
+            "total_chunks": len(total_chunk_ids),
+        }

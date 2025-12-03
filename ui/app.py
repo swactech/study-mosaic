@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 from typing import List
+import pandas as pd
 
 import streamlit as st  # type: ignore
 from dotenv import load_dotenv
@@ -15,11 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.agents.supervisor import SupervisorAgent  # noqa
+from app.tools.ingest import ingest_pdfs  # noqa
+from app.tools.vector_store import LocalVectorStore  # noqa
+
 # Load environment variables from .env at repo root so Streamlit picks up keys.
 load_dotenv(ROOT / ".env")
-
-from app.agents.supervisor import SupervisorAgent
-from app.tools.ingest import ingest_pdfs
 
 
 st.set_page_config(page_title="Study-Mosaic", layout="wide")
@@ -50,29 +52,77 @@ def get_saved_uploads(session_id: str) -> List[Path]:
     return sorted(session_dir.glob("*.pdf"))
 
 
+def get_ingested_chunk_metadata(session_id: str) -> List[dict]:
+    """Fetch stored chunk metadata for the session to inform generation UI."""
+    try:
+        store = LocalVectorStore(session_id=session_id)
+        return store.list_metadatas()
+    except Exception as exc:  # pragma: no cover - defensive UI guard
+        st.warning(f"Unable to read ingested chunks for this session: {exc}")
+        return []
+
+
+def render_ingested_summary(chunk_metadata: List[dict]) -> None:
+    """Show users what has been ingested so far."""
+    if not chunk_metadata:
+        st.info(
+            "No ingested chunks yet for this session. Ingest PDFs to enable flashcard generation.")
+        return
+
+    st.success(
+        f"{len(chunk_metadata)} ingested chunk(s) ready for flashcard generation.")
+
+    by_pdf = {}
+    for meta in chunk_metadata:
+        pdf = meta.get("pdf", "Unknown PDF")
+        entry = by_pdf.setdefault(pdf, {"chunks": 0, "pages": set()})
+        entry["chunks"] += 1
+        page = meta.get("page")
+        if page is not None:
+            entry["pages"].add(page)
+
+    by_pdf_df = pd.DataFrame.from_dict(
+        by_pdf, orient="index").reset_index().rename(columns={"index": "title"})
+    # strip ".pdf" and optionally shorten for display
+    by_pdf_df["title"] = by_pdf_df["title"].str.replace(
+        ".pdf", "", regex=False)
+
+    # convert the pages set to "min-max" string like "1-55"
+    by_pdf_df["pages"] = by_pdf_df["pages"].apply(
+        lambda s: f"{min(s)}-{max(s)}" if s else ""
+    )
+    st.dataframe(by_pdf_df)
+
+
 def main():
     session_id = st.text_input("Session ID", value="demo-session")
-    uploads = st.file_uploader("Upload 1-5 PDFs", type=["pdf"], accept_multiple_files=True)
+    uploads = st.file_uploader(
+        "Upload 1-5 PDFs", type=["pdf"], accept_multiple_files=True)
     saved = get_saved_uploads(session_id)
     if saved:
-        st.caption("Found existing uploads for this session: " + ", ".join(p.name for p in saved))
+        st.caption("Found existing uploads for this session: " +
+                   ", ".join(p.name for p in saved))
 
     col1, col2 = st.columns(2)
     with col1:
         ingest_new = st.button("Ingest NEW uploads")
     with col2:
-        ingest_existing = st.button("Ingest EXISTING uploads")
+        if saved:
+            ingest_existing = st.button("Ingest EXISTING uploads")
 
     if ingest_new:
         if not uploads:
             st.error("Please upload 1-5 PDFs before ingesting new files.")
         else:
-            saved_paths = save_uploads(uploads, Path("data/uploads") / session_id)
+            saved_paths = save_uploads(
+                uploads, Path("data/uploads") / session_id)
             with st.spinner("Ingesting PDFs..."):
-                chunks = ingest_pdfs(session_id=session_id, pdf_paths=saved_paths)
-            st.success(f"Ingested {len(chunks)} chunks across {len(saved_paths)} file(s).")
+                chunks = ingest_pdfs(session_id=session_id,
+                                     pdf_paths=saved_paths)
+            st.success(
+                f"Ingested {len(chunks)} chunks across {len(saved_paths)} file(s).")
 
-    if ingest_existing:
+    if saved and ingest_existing:
         if not saved:
             st.error("No existing uploads found for this session.")
         elif uploads:
@@ -82,20 +132,24 @@ def main():
         else:
             with st.spinner("Ingesting existing PDFs..."):
                 chunks = ingest_pdfs(session_id=session_id, pdf_paths=saved)
-            st.success(f"Ingested {len(chunks)} chunks across {len(saved)} existing file(s).")
+            st.success(
+                f"Ingested {len(chunks)} chunks across {len(saved)} existing file(s).")
 
-    prompt = st.text_input("Flashcard request", value="Create flashcards for the whole document")
+    prompt = st.text_input("Flashcard request",
+                           value="Create flashcards for the whole document")
     coverage_threshold = st.slider("Coverage threshold", 0.1, 1.0, 0.8, 0.05)
     max_rounds = st.slider("Max rounds", 1, 5, 3, 1)
 
-    if st.button("Generate flashcards"):
+    ingested_metadata = get_ingested_chunk_metadata(session_id)
+    render_ingested_summary(ingested_metadata)
+
+    if ingested_metadata and st.button("Generate flashcards"):
         with st.spinner("Generating..."):
-            supervisor = SupervisorAgent()
+            supervisor = SupervisorAgent(
+                max_iterations=max_rounds, coverage_threshold=coverage_threshold)
             result = supervisor.handle(
                 session_id=session_id,
                 message=prompt,
-                coverage_threshold=coverage_threshold,
-                max_rounds=max_rounds,
                 top_k=None,
             )
         cards = result.get("flashcards", [])
