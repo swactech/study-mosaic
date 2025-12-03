@@ -76,22 +76,26 @@ def run_with_inmemory_runner(
 
     # Ensure the session exists before running.
     session = _maybe_await(
-        session_service.get_session(app_name=app_name, user_id=user, session_id=session_id)
+        session_service.get_session(
+            app_name=app_name, user_id=user, session_id=session_id)
     )
     if not session:
         session = _maybe_await(
-            session_service.create_session(app_name=app_name, user_id=user, session_id=session_id)
+            session_service.create_session(
+                app_name=app_name, user_id=user, session_id=session_id)
         )
 
     # Build ADK content message.
-    content = genai_types.Content(role="user", parts=[genai_types.Part(text=payload_text)])
+    content = genai_types.Content(
+        role="user", parts=[genai_types.Part(text=payload_text)])
 
     # Drive the runner to completion (synchronous generator).
     for _ in runner.run(user_id=user, session_id=session_id, new_message=content):
         pass
 
     session = _maybe_await(
-        session_service.get_session(app_name=app_name, user_id=user, session_id=session_id)
+        session_service.get_session(
+            app_name=app_name, user_id=user, session_id=session_id)
     )
     if not session:
         return None
@@ -155,20 +159,34 @@ def run_agent_and_get_state(
     session_service = runner.session_service
 
     session = _maybe_await(
-        session_service.get_session(app_name=app_name, user_id=user, session_id=session_id)
+        session_service.get_session(
+            app_name=app_name, user_id=user, session_id=session_id)
     )
     if not session:
         session = _maybe_await(
-            session_service.create_session(app_name=app_name, user_id=user, session_id=session_id)
+            session_service.create_session(
+                app_name=app_name, user_id=user, session_id=session_id, state=initial_state
+            )
         )
-    if initial_state:
+    elif initial_state:
+        # Persist initial state for existing sessions so LLM templates can reference it.
         session.state.update(initial_state)
+        # Best-effort: update the backing session store if the service exposes it (InMemoryRunner does).
+        try:
+            storage_session = session_service.sessions[app_name][user][session_id]
+            storage_session.state.update(initial_state)
+        except Exception:
+            # If the session service doesn't expose in-memory storage, we still have the local update.
+            pass
 
-    content = genai_types.Content(role="user", parts=[genai_types.Part(text=payload_text)])
+    content = genai_types.Content(
+        role="user", parts=[genai_types.Part(text=payload_text)])
     for _ in runner.run(user_id=user, session_id=session_id, new_message=content):
+        # print(f"\n\n{_}\n\n")
         pass
 
     session = _maybe_await(
-        session_service.get_session(app_name=app_name, user_id=user, session_id=session_id)
+        session_service.get_session(
+            app_name=app_name, user_id=user, session_id=session_id)
     )
     return session.state if session else {}

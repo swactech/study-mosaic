@@ -3,21 +3,21 @@ Supervisor agent: routes user intents to specialized agents.
 """
 
 import json
-from typing import Any, AsyncGenerator, Dict, List
+from typing import Any, AsyncGenerator, Dict
 
 from app.agents.flashcards import FlashcardAgent
 from app.agents.coverage import CoverageAgent
+from app.agents.refiner import RefinerAgent
 from app.tools.retrieval import retrieve_chunks
 from app.adk_utils import run_agent_and_get_state
 
 # Prefer documented import path; fall back to legacy name if needed.
 try:
-    from google.adk.agents import BaseAgent, LoopAgent  # type: ignore
-    from google.adk.agents.invocation_context import InvocationContext  # type: ignore
+    from google.adk.agents import BaseAgent, LoopAgent, SequentialAgent  # type: ignore
+    from google.adk.agents.invocation_context import InvocationContext
 except ImportError:  # pragma: no cover
     try:
-        from adk import BaseAgent, LoopAgent  # type: ignore
-        from adk import InvocationContext  # type: ignore
+        from adk import BaseAgent, LoopAgent, SequentialAgent  # type: ignore
     except ImportError as exc:  # pragma: no cover
         raise ImportError(
             "google-adk is required (expected Agent in google.adk.agents). "
@@ -36,25 +36,31 @@ class SupervisorAgent(BaseAgent):
     flashcard_agent: Any
     coverage_agent: Any
     loop_agent: Any
+    sequence_agent: Any
 
     def __init__(self, max_iterations: int = 3, coverage_threshold: float = 0.8):
         # Child agents that do the real work.
         flashcard = FlashcardAgent()
         coverage = CoverageAgent(coverage_threshold)
+        refiner = RefinerAgent()
         flashcard_agent = flashcard.agent
         coverage_agent = coverage.agent
+        refiner_agent = refiner.agent
 
-        # LoopAgent is registered for introspection; control flow is managed here.
         loop_agent = LoopAgent(
             name="flashcard_coverage_loop",
-            sub_agents=[flashcard_agent, coverage_agent],
+            sub_agents=[coverage_agent, refiner_agent],
             max_iterations=max_iterations,
+        )
+
+        sequence_agent = SequentialAgent(
+            name="flashcard_generation_pipeline",
+            sub_agents=[flashcard_agent, loop_agent]
         )
 
         super().__init__(
             name="supervisor_orchestrator",
-            # Only attach the loop agent to avoid double-parenting children.
-            sub_agents=[loop_agent],
+            sub_agents=[sequence_agent],
             max_iterations=max_iterations,
             coverage_threshold=coverage_threshold,
             flashcard=flashcard,
@@ -62,77 +68,23 @@ class SupervisorAgent(BaseAgent):
             flashcard_agent=flashcard_agent,
             coverage_agent=coverage_agent,
             loop_agent=loop_agent,
+            sequence_agent=sequence_agent,
         )
-
-    @staticmethod
-    def _coerce_cards(raw_cards: Any) -> List[Dict]:
-        if not raw_cards:
-            return []
-        if isinstance(raw_cards, str):
-            try:
-                parsed = json.loads(raw_cards)
-                return parsed if isinstance(parsed, list) else [parsed]
-            except json.JSONDecodeError:
-                return []
-        if isinstance(raw_cards, list):
-            return raw_cards
-        if isinstance(raw_cards, dict):
-            return [raw_cards]
-        return []
-
-    @staticmethod
-    def _extract_cited_ids(cards: List[Dict]) -> List[str]:
-        cited = []
-        for card in cards:
-            for cite in card.get("citations", []):
-                cid = cite.get("location", {}).get("chunk_id")
-                if cid:
-                    cited.append(cid)
-        return cited
 
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Any, None]:
-        """
-        Manual loop: run flashcards, parse citations, run coverage, repeat if needed.
-        """
-        iteration = 0
-        total_chunks = ctx.session.state.get("total_chunks", [])
-        coverage_threshold = ctx.session.state.get(
-            "coverage_threshold", self.coverage_threshold
+        # Delegate orchestration to the pre-built SequentialAgent.
+        sequence_agent = getattr(self, "sequence_agent", None) or (
+            self.sub_agents[0] if self.sub_agents else None
         )
+        if sequence_agent is None:
+            return
 
-        while iteration < self.loop_agent.max_iterations:
-            iteration += 1
+        async for event in sequence_agent.run_async(ctx):
+            yield event
 
-            # Run flashcards; their output is stored in session via output_key.
-            async for event in self.flashcard_agent.run_async(ctx):
-                yield event
-
-            cards = self._coerce_cards(ctx.session.state.get("flashcards"))
-            cited_ids = self._extract_cited_ids(cards)
-
-            coverage_payload = {
-                "total_chunks": total_chunks,
-                "cited_chunks": cited_ids,
-                "coverage_threshold": coverage_threshold,
-            }
-            # Run coverage synchronously; store result in session state.
-            raw = self.coverage_agent.run(
-                messages=[
-                    {"role": "user", "content": json.dumps(coverage_payload)}]
-            )
-            coverage_output = getattr(raw, "output", raw)
-            ctx.session.state["coverage_result"] = coverage_output
-
-            continue_flag = False
-            if isinstance(coverage_output, dict):
-                continue_flag = coverage_output.get("continue") or coverage_output.get(
-                    "continue_", False
-                )
-
-            if not continue_flag:
-                break
+        print(f"\n\n{ctx.session.state.keys()}\n\n")
 
     def handle(
         self,
@@ -167,7 +119,8 @@ class SupervisorAgent(BaseAgent):
             },
         )
 
-        raw_cards = session_state.get("flashcards") or []
+        raw_cards = session_state.get(
+            "refined_version", session_state.get("flashcards", {}).get("flashcards")) or []
         if isinstance(raw_cards, str):
             try:
                 raw_cards = json.loads(raw_cards)
@@ -175,7 +128,7 @@ class SupervisorAgent(BaseAgent):
                 raw_cards = {}
 
         result = self.flashcard.parse_output(
-            chunks, raw_cards.get("flashcards", []))
+            chunks, raw_cards)
 
         coverage_state = session_state.get("coverage_result")
         if isinstance(coverage_state, str):

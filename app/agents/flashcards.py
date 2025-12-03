@@ -2,8 +2,7 @@
 Flashcard agent: pulls context via retrieval and drafts grounded flashcards.
 """
 
-import json
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 from app.config import settings
 from app.context.prompts import FlashcardSetStrict, FLASHCARD_SYSTEM_PROMPT
@@ -11,6 +10,8 @@ from app.context.prompts import FlashcardSetStrict, FLASHCARD_SYSTEM_PROMPT
 # Prefer documented import path; fall back to legacy name if needed.
 try:
     from google.adk.agents import LlmAgent  # type: ignore
+    from google.adk.models import Gemini
+    from google.genai import types
 except ImportError:  # pragma: no cover
     try:
         from adk import LlmAgent  # type: ignore
@@ -25,11 +26,21 @@ class FlashcardAgent:
     """Specialized agent for flashcard generation."""
 
     def __init__(self):
+        retry_config = types.HttpRetryOptions(
+            attempts=5,  # Maximum retry attempts
+            exp_base=7,  # Delay multiplier
+            initial_delay=1,
+            # Retry on these HTTP errors
+            http_status_codes=[429, 500, 503, 504],
+        )
         self.agent = LlmAgent(
             name="flashcard_agent",
             description="Generates grounded flashcards with citations.",
             instruction=FLASHCARD_SYSTEM_PROMPT,
-            model=settings.model_name,
+            model=Gemini(
+                name=settings.model_name,
+                retry_options=retry_config,
+            ),
             output_schema=FlashcardSetStrict,
             output_key="flashcards",
         )

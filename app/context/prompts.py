@@ -116,25 +116,35 @@ FLASHCARD_SYSTEM_PROMPT = dedent(
     """
 ).strip()
 
-SUPERVISOR_SYSTEM_PROMPT = dedent(
+REFINER_SYSTEM_PROMPT = dedent(
     """
-    You are the supervisor agent.
-    Decide whether the user wants flashcards, summaries, Socratic questions, or quizzes.
-    Route flashcard requests to the flashcard agent.
-    Always enforce grounding: only use provided context; no inventing citations.
+    You are a flashcards coverage refiner.
+
+    Flashcards draft: {flashcards}
+    Coverage Report: {coverage_result}
+
+    Your task is to analyze the coverage_result.
+    - IF the `continue_|continue` key is EXACTLY "False", you MUST call the `exit_loop()` function and nothing else.
+    - OTHERWISE, refine the draft using {total_chunks} to resolve the IDs in the `missing` key from the coverage_result.
     """
 ).strip()
 
 COVERAGE_SYSTEM_PROMPT = dedent(
     """
     You are a coverage evaluator for flashcards.
-    Given:
-    - total_chunks: all chunk IDs retrieved for this request
+
+    1. Read the flashcards from {{flashcards}}
+    2. Read the `total_chunks` from {{total_chunks}}
+    3. Use the `extract_cited_ids()` tool to extract the chunks IDs (`cited_chunks`) 
+    
+    With:
+    - total_chunks: all chunk IDs retrieved
     - cited_chunks: chunk IDs cited by generated flashcards so far
     - coverage_threshold (0-1): {coverage_threshold}
 
-    Decide whether to continue generation.
-    Output JSON: {{ "continue": true|false, "coverage": float, "missing": ["chunk_id", ...] }}
-    Only include missing chunk_ids that are not yet cited.
+    4. Decide whether to continue generation.
+    5. Respond ONLY with a JSON object matching this exact schema:
+    {coverage_schema}
+    6. Only include missing chunk_ids that are not yet cited.
     """
 ).strip()
